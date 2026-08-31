@@ -1,19 +1,30 @@
 #!/bin/bash
 
-# omarchy:summary=Show, set, or adjust focused Hyprland monitor scaling
-# omarchy:args=[up|down|SCALE]
-# omarchy:examples=omarchy hyprland monitor scaling | omarchy hyprland monitor scaling 1.6 | omarchy hyprland monitor scaling up | omarchy hyprland monitor scaling down
+# omarchy:summary=Show, set, or adjust Hyprland monitor scaling
+# omarchy:args=[--monitor NAME] [up|down|SCALE]
+# omarchy:examples=omarchy hyprland monitor scaling | omarchy hyprland monitor scaling 1.6 | omarchy hyprland monitor scaling up | omarchy hyprland monitor scaling --monitor DP-1 1.25
 
 SCALES=(1 1.25 1.6 2 3 4)
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 SCALE_LOG="$STATE_DIR/monitor-scaling.log"
 
+# Monitor to operate on; empty means the focused one.
+TARGET_MONITOR=""
+
 usage() {
-  echo "Usage: omarchy-hyprland-monitor-scaling [up|down|SCALE]"
+  echo "Usage: omarchy-hyprland-monitor-scaling [--monitor NAME] [up|down|SCALE]"
 }
 
-focused_monitor_scale() {
-  hyprctl monitors -j | jq -er '.[] | select(.focused == true) | .scale'
+target_monitor_json() {
+  if [[ -n $TARGET_MONITOR ]]; then
+    hyprctl monitors -j | jq -e -c --arg name "$TARGET_MONITOR" '[.[] | select(.name == $name)][0] // empty'
+  else
+    hyprctl monitors -j | jq -e -c '[.[] | select(.focused == true)][0] // empty'
+  fi
+}
+
+target_monitor_scale() {
+  target_monitor_json | jq -er '.scale'
 }
 
 cmdline_for_pid() {
@@ -74,12 +85,19 @@ normalize_scale() {
 set_scale() {
   local requested_scale="$1"
   local requested="${2:-$requested_scale}"
-  local monitor_info="$(hyprctl monitors -j | jq -e -c '.[] | select(.focused == true)')"
+  local monitor_info="$(target_monitor_json)"
+
+  if [[ -z $monitor_info ]]; then
+    echo "No such monitor: ${TARGET_MONITOR:-focused}" >&2
+    exit 1
+  fi
+
   local active_monitor="$(echo "$monitor_info" | jq -r '.name')"
   local current_scale="$(echo "$monitor_info" | jq -r '.scale')"
   local width="$(echo "$monitor_info" | jq -r '.width')"
   local height="$(echo "$monitor_info" | jq -r '.height')"
   local refresh_rate="$(echo "$monitor_info" | jq -r '.refreshRate')"
+  local description="$(echo "$monitor_info" | jq -r '.description // ""')"
 
   # active_monitor is written into the Lua string eval'd below, so only a plain
   # connector name may pass; a hostile output name could execute otherwise.
@@ -88,27 +106,98 @@ set_scale() {
     exit 1
   fi
 
+  # The description lands inside a quoted Lua string when a rule is pinned;
+  # drop it if it could escape the quotes.
+  [[ $description == *[\"\\]* ]] && description=""
+
   local new_scale="$(clean_scale "$requested_scale" "$width" "$height")"
   # GTK only honors integer GDK_SCALE values, so persist the nearest whole
   # factor even when the monitor scale itself is fractional.
   local new_gdk_scale="$(awk -v scale="$new_scale" 'BEGIN { printf "%d", int(scale + 0.5) }')"
   local monitor_lua="$HOME/.config/hypr/monitors.lua"
+  local all_monitors_json="$(hyprctl monitors all -j)"
+
+  # A description identifies a monitor across connectors only when no other
+  # attached display shares it (twins of one model without a serial do).
+  if [[ -n $description ]]; then
+    local desc_count="$(jq --arg d "$description" '[.[] | select(.description == $d)] | length' <<<"$all_monitors_json")"
+    [[ $desc_count -eq 1 ]] || description=""
+  fi
 
   hyprctl eval "hl.monitor({ output = \"$active_monitor\", mode = \"${width}x${height}@${refresh_rate}\", position = \"auto\", scale = $new_scale })" >/dev/null
   audit_scale_change "$requested" "$active_monitor" "$current_scale" "$new_scale"
 
-  # Persist to monitors.lua if the user still has Omarchy's generic catch-all
-  # defaults, so the scale survives reboots.
-  if [[ -f $monitor_lua ]] && grep -q '^local omarchy_monitor_scale = ' "$monitor_lua"; then
-    sed -i -E \
-      -e "s|^local omarchy_monitor_scale = .*|local omarchy_monitor_scale = ${new_scale}|" \
+  # monitors.lua is edited through its resolved target (it is a symlink into
+  # the user's dotfiles on some setups) and replaced atomically, so a reload
+  # racing this write reads either the old or the new configuration, never
+  # a truncated one.
+  rewrite_monitor_lua() {
+    local target tmp
+    target="$(readlink -f "$monitor_lua")" || return 1
+    tmp="$(mktemp -p "$(dirname "$target")" .monitors.lua.XXXXXX)" || return 1
+    if "$@" "$target" >"$tmp" && chmod --reference="$target" "$tmp" && mv -f "$tmp" "$target"; then
+      return 0
+    fi
+    rm -f "$tmp"
+    return 1
+  }
+
+  # Comments are stripped before a rule is matched, so a commented example
+  # or a trailing comment naming another output is never taken for a rule.
+  # awk matches the needle as a fixed string so descriptions with regex
+  # metacharacters stay safe.
+  rule_exists() {
+    sed -e 's/--.*$//' "$monitor_lua" | grep -qF "$1"
+  }
+  update_rule_scale() {
+    rewrite_monitor_lua awk -v needle="$1" -v scale="$new_scale" '
+      { rule = $0; sub(/--.*$/, "", rule) }
+      rule ~ /^[[:space:]]*hl\.monitor\(/ && index(rule, needle) { sub(/scale = ("auto"|[0-9.]+)/, "scale = " scale) }
+      { print }
+    '
+  }
+  append_rule() {
+    rewrite_monitor_lua awk -v rule="$1" '{ print } END { print rule }'
+  }
+
+  # Persist so the scale survives reboots. A rule that names this monitor (by
+  # EDID description or by connector) is updated in place. Without one, the
+  # generic defaults - Omarchy's scale knob, else the catch-all rule - are
+  # rewritten only when this is the only display attached at all, disabled
+  # ones included: they govern every display without a rule of its own, and
+  # a change aimed at one of several (a clamshelled laptop's external, say)
+  # must not become the default the others inherit. Then the monitor gets
+  # pinned with a rule of its own.
+  local desc_needle="output = \"desc:${description}\""
+  local name_needle="output = \"${active_monitor}\""
+  local attached_count="$(jq 'length' <<<"$all_monitors_json")"
+
+  if [[ ! -f $monitor_lua ]]; then
+    :
+  elif [[ -n $description ]] && rule_exists "$desc_needle"; then
+    update_rule_scale "$desc_needle"
+  elif rule_exists "$name_needle"; then
+    update_rule_scale "$name_needle"
+  elif [[ $attached_count -eq 1 ]] && grep -q '^local omarchy_monitor_scale = ' "$monitor_lua"; then
+    rewrite_monitor_lua sed -E \
+      -e "s|^local omarchy_monitor_scale = .*|local omarchy_monitor_scale = ${new_scale}|"
+  elif [[ $attached_count -eq 1 ]] && grep -Eq '^hl\.monitor\(\{ output = "", mode = "preferred", position = "auto", scale = ("auto"|[0-9.]+) \}\)' "$monitor_lua"; then
+    rewrite_monitor_lua sed -E \
+      -e "s|^(hl\.monitor\(\{ output = \"\", mode = \"preferred\", position = \"auto\", scale = )([^ ]+)( \}\))|\\1${new_scale}\\3|"
+  else
+    local out="$active_monitor"
+    [[ -n $description ]] && out="desc:${description}"
+    append_rule "$(printf 'hl.monitor({ output = "%s", mode = "%sx%s@%s", position = "auto", scale = %s })' \
+      "$out" "$width" "$height" "$refresh_rate" "$new_scale")"
+  fi
+
+  # GDK_SCALE is one global value for GTK: it follows the built-in panel, or
+  # the only display when the machine has none.
+  local has_internal="$(jq '[.[] | select(.name | test("^(eDP|LVDS|DSI)-"))] | length' <<<"$all_monitors_json")"
+  if [[ -f $monitor_lua ]] && { [[ $attached_count -eq 1 ]] || [[ $active_monitor =~ ^(eDP|LVDS|DSI)- ]]; }; then
+    rewrite_monitor_lua sed -E \
       -e "s|^local omarchy_gdk_scale = .*|local omarchy_gdk_scale = ${new_gdk_scale}|" \
-      "$monitor_lua"
-  elif [[ -f $monitor_lua ]] && grep -Eq '^hl\.monitor\(\{ output = "", mode = "preferred", position = "auto", scale = ("auto"|[0-9.]+) \}\)' "$monitor_lua"; then
-    sed -i -E \
-      -e "s|^(hl\.monitor\(\{ output = \"\", mode = \"preferred\", position = \"auto\", scale = )([^ ]+)( \}\))|\\1${new_scale}\\3|" \
-      -e 's|^hl\.env\("GDK_SCALE", ".*"\)|hl.env("GDK_SCALE", "'"$new_gdk_scale"'")|' \
-      "$monitor_lua"
+      -e 's|^hl\.env\("GDK_SCALE", ".*"\)|hl.env("GDK_SCALE", "'"$new_gdk_scale"'")|'
   fi
 }
 
@@ -171,20 +260,40 @@ scale_from_current() {
     }'
 }
 
+args=()
+while (($#)); do
+  case "$1" in
+  --monitor)
+    [[ $# -ge 2 ]] || { usage >&2; exit 1; }
+    TARGET_MONITOR="$2"
+    shift 2
+    ;;
+  --monitor=*)
+    TARGET_MONITOR="${1#--monitor=}"
+    shift
+    ;;
+  *)
+    args+=("$1")
+    shift
+    ;;
+  esac
+done
+set -- "${args[@]}"
+
 case "${1:-}" in
 "")
-  focused_monitor_scale | normalize_scale
+  target_monitor_scale | normalize_scale
   ;;
 -h | --help)
   usage
   ;;
 up)
-  monitor_info=$(hyprctl monitors -j | jq -e -c '.[] | select(.focused == true)')
+  monitor_info=$(target_monitor_json)
   set_scale "$(echo "$monitor_info" | jq -r '.scale' | scale_from_current next \
     "$(echo "$monitor_info" | jq -r '.width')" "$(echo "$monitor_info" | jq -r '.height')")" "up"
   ;;
 down)
-  monitor_info=$(hyprctl monitors -j | jq -e -c '.[] | select(.focused == true)')
+  monitor_info=$(target_monitor_json)
   set_scale "$(echo "$monitor_info" | jq -r '.scale' | scale_from_current previous \
     "$(echo "$monitor_info" | jq -r '.width')" "$(echo "$monitor_info" | jq -r '.height')")" "down"
   ;;

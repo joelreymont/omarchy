@@ -88,10 +88,28 @@ configured_monitor_value() {
   lua_scalar "$value"
 }
 
+# A rule may name the internal panel by its EDID description rather than by
+# connector (omarchy-hyprland-monitor-scaling pins that form when it is
+# unique); resolve that first, as Hyprland does, so this reconciler and the
+# writer derive the same scale from the same rule.
+regex_escape() {
+  printf '%s' "$1" | sed -E 's/[][\\.*^$/|+?(){}]/\\&/g'
+}
+
+internal_monitor_description() {
+  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal) | .description // ""' | head -1
+}
+
 configured_internal_monitor_value() {
   [[ -n $INTERNAL ]] || return 0
 
-  configured_monitor_value "$INTERNAL" "$1"
+  local description value
+  description=$(internal_monitor_description)
+  if [[ -n $description ]]; then
+    value=$(configured_monitor_value "desc:$(regex_escape "$description")" "$1")
+  fi
+  [[ -n $value ]] || value=$(configured_monitor_value "$INTERNAL" "$1")
+  printf '%s\n' "$value"
 }
 
 configured_monitor_scale() {
