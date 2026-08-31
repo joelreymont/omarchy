@@ -4,4 +4,16 @@
 # omarchy:hidden=true
 
 # Clamshell = lid closed while driving one or more external monitors.
-omarchy-hw-laptop-closed && omarchy-hw-external-monitors
+#
+# A lid switch bind that runs a handler knows the transition it is handling
+# and passes it in OMARCHY_LID; the platform's own view (logind on machines
+# without ACPI) may not have caught up with that very event yet.
+lid_closed() {
+  case ${OMARCHY_LID-} in
+  closed) return 0 ;;
+  open) return 1 ;;
+  esac
+  omarchy-hw-laptop-closed
+}
+
+lid_closed && omarchy-hw-external-monitors

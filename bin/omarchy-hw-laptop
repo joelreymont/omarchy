@@ -14,4 +14,12 @@ case $(< /sys/class/dmi/id/chassis_type 2>/dev/null) in
 8 | 9 | 10 | 14 | 30 | 31 | 32) exit 0 ;;
 esac
 
+# Devicetree platforms (e.g. Apple Silicon under Asahi) have neither ACPI nor
+# DMI; there the lid is an input switch advertising SW_LID (bit 0 of the
+# hex sw capability bitmask).
+for sw in /sys/class/input/event*/device/capabilities/sw; do
+  [[ -r $sw ]] || continue
+  ((0x$(<"$sw") & 1)) && exit 0
+done
+
 exit 1

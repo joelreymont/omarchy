@@ -13,7 +13,19 @@
 # A docked lid close does not suspend (HandleLidSwitchDocked defaults to
 # ignore), so it must not lock either: that is clamshell mode, still in use on
 # the external display.
-if omarchy-hw-laptop-closed && ! omarchy-hw-external-monitors; then
+#
+# The switch bind that runs this knows the lid just closed and says so in
+# OMARCHY_LID; only a caller without that knowledge asks the platform, whose
+# logind view may lag behind the very event being handled.
+lid_closed() {
+  case ${OMARCHY_LID-} in
+  closed) return 0 ;;
+  open) return 1 ;;
+  esac
+  omarchy-hw-laptop-closed
+}
+
+if lid_closed && ! omarchy-hw-external-monitors; then
   omarchy-system-lock >/dev/null 2>&1 || true
 fi
 

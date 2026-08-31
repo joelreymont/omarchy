@@ -3,9 +3,21 @@
 # omarchy:summary=Returns true when the laptop lid is closed
 # omarchy:hidden=true
 
+# ACPI is authoritative where it exists: a readable lid state answers the
+# question, open or closed. Only a platform without any ACPI lid (devicetree
+# machines such as Apple Silicon, where the lid is an SW_LID input switch)
+# falls through to logind, which tracks that switch for every platform.
+acpi_seen=false
 for state in /proc/acpi/button/lid/*/state; do
   [[ -r $state ]] || continue
+  acpi_seen=true
   [[ $(< "$state") == *"closed"* ]] && exit 0
 done
+[[ $acpi_seen == true ]] && exit 1
+
+if lid=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager LidClosed 2>/dev/null); then
+  [[ $lid == "b true" ]] && exit 0
+fi
 
 exit 1

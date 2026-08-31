@@ -59,7 +59,7 @@ grep -F '.disabled != true and (.width == 0 or .height == 0)' "$ROOT/bin/omarchy
 grep -F 'hyprctl monitors all -j' "$ROOT/bin/omarchy-hyprland-monitor-modeless" >/dev/null
 pass "modeless helper sees mirrors and ignores monitors disabled on purpose"
 
-grep -F 'omarchy-hw-laptop-closed && omarchy-hw-external-monitors' "$hw_clamshell" >/dev/null
+grep -F 'lid_closed && omarchy-hw-external-monitors' "$hw_clamshell" >/dev/null
 grep -F '/proc/acpi/button/lid/*/state' "$hw_laptop_closed" >/dev/null
 pass "clamshell helper detects closed-lid external monitor state"
 
@@ -97,9 +97,18 @@ pass "internal monitor recovery only wakes displays when it re-enables one"
 grep -F 'omarchy-hyprland-monitor-external-active' "$monitor_mirror" >/dev/null
 pass "internal mirror helper recovers when no active external display remains"
 
-grep -F 'switch:on:Lid Switch", nil, "omarchy-system-lid-close"' "$utilities" >/dev/null
-grep -F 'switch:off:Lid Switch", nil, "omarchy-hyprland-monitor-clamshell"' "$utilities" >/dev/null
-pass "lid switch bindings lock on close and reconcile clamshell display state"
+grep -F 'o.bind("switch:on:" .. name, nil, "OMARCHY_LID=closed omarchy-system-lid-close"' "$utilities" >/dev/null
+grep -F 'o.bind("switch:off:" .. name, nil, "OMARCHY_LID=open omarchy-hyprland-monitor-clamshell"' "$utilities" >/dev/null
+grep -F '/sys/class/input/event*/device/capabilities/sw' "$utilities" >/dev/null
+grep -F '{ "Lid Switch" }' "$utilities" >/dev/null
+pass "lid switch bindings cover every SW_LID device and hand the transition to the handlers"
+
+# The handlers take the transition the bind hands them over the platform's
+# possibly stale view of the lid.
+grep -F 'acpi_seen' "$ROOT/bin/omarchy-hw-laptop-closed" >/dev/null
+grep -F 'OMARCHY_LID' "$ROOT/bin/omarchy-hw-clamshell" >/dev/null
+grep -F 'OMARCHY_LID' "$ROOT/bin/omarchy-system-lid-close" >/dev/null
+pass "lid handlers trust the switch transition and ACPI before logind"
 
 grep -F 'omarchy-hyprland-monitor-clamshell >/dev/null 2>&1 || true' "$system_wake" >/dev/null
 pass "system wake resyncs clamshell display state"

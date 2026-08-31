@@ -31,8 +31,35 @@ o.bind_toggle("SUPER + CTRL + I", "Toggle locking on idle", "idle")
 o.bind_toggle("SUPER + CTRL + N", "Toggle nightlight", "nightlight")
 o.bind("SUPER + CTRL + Delete", "Toggle laptop display", "omarchy-hyprland-monitor-internal toggle")
 o.bind("SUPER + CTRL + ALT + Delete", "Toggle laptop display mirroring", "omarchy-hyprland-monitor-internal-mirror toggle")
-o.bind("switch:on:Lid Switch", nil, "omarchy-system-lid-close", { locked = true })
-o.bind("switch:off:Lid Switch", nil, "omarchy-hyprland-monitor-clamshell", { locked = true })
+-- Hyprland names a switch bind after the input device, and the lid's name is
+-- the driver's choice ("Lid Switch" under ACPI, "Apple SMC power/lid events"
+-- on Apple Silicon). Bind every device that advertises the SW_LID capability
+-- (bit 0 of its sw capability mask) rather than a list of known names; the
+-- ACPI name stays as the fallback for a config evaluated without sysfs.
+local function lid_switch_names()
+  local names, seen = { "Lid Switch" }, { ["Lid Switch"] = true }
+  local handle = io.popen([[for sw in /sys/class/input/event*/device/capabilities/sw; do
+    [ -r "$sw" ] || continue
+    [ $((0x$(cat "$sw") & 1)) -ne 0 ] && cat "${sw%/capabilities/sw}/name"
+  done 2>/dev/null]])
+  if handle then
+    for name in handle:lines() do
+      if name ~= "" and not seen[name] then
+        seen[name] = true
+        table.insert(names, name)
+      end
+    end
+    handle:close()
+  end
+  return names
+end
+
+for _, name in ipairs(lid_switch_names()) do
+  -- The switch event is the truth about the lid: hand it to the handlers so
+  -- they do not re-derive it from logind, which may not have seen it yet.
+  o.bind("switch:on:" .. name, nil, "OMARCHY_LID=closed omarchy-system-lid-close", { locked = true })
+  o.bind("switch:off:" .. name, nil, "OMARCHY_LID=open omarchy-hyprland-monitor-clamshell", { locked = true })
+end
 
 o.bind("PRINT", "Screenshot", "omarchy-capture-screenshot")
 o.bind("ALT + PRINT", "Screenrecording", "omarchy-capture-screenrecording --stop-recording || omarchy-menu toggle trigger.capture.screenrecord")
