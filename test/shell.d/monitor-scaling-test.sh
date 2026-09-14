@@ -18,8 +18,9 @@ mkdir -p "$stub_bin" "$home_dir/.config/hypr"
 cat >"$stub_bin/hyprctl" <<'SH'
 #!/bin/bash
 
-if [[ $1 == "monitors" && $2 == "-j" ]]; then
-  printf '[{"name":"eDP-1","focused":true,"scale":%s,"width":%s,"height":%s,"refreshRate":120.0}]' \
+if [[ $1 == "monitors" && ( $2 == "-j" || ( $2 == "all" && $3 == "-j" ) ) ]]; then
+  # One attached display, so the generic defaults are this monitor's to edit.
+  printf '[{"name":"eDP-1","description":"BOE 0x0A4F","focused":true,"disabled":false,"scale":%s,"width":%s,"height":%s,"refreshRate":120.0}]' \
     "${OMARCHY_TEST_MONITOR_SCALE:-2}" "${OMARCHY_TEST_MONITOR_WIDTH:-2880}" "${OMARCHY_TEST_MONITOR_HEIGHT:-1800}"
 elif [[ $1 == "eval" ]]; then
   printf '%s\n' "$2" >"$OMARCHY_TEST_HYPRCTL_EVAL_OUT"

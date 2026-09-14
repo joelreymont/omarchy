@@ -31,10 +31,17 @@ grep -F 'sync_clamshell_after_monitor_change' "$monitor_watch" >/dev/null
 grep -F 'socat -U - "UNIX-CONNECT:$SOCKET"' "$monitor_watch" >/dev/null
 pass "monitor watcher reconciles clamshell state on startup"
 
-grep -F 'omarchy-hw-laptop && omarchy-hyprland-monitor-external-active' "$monitor_watch" >/dev/null
+grep -F 'omarchy-hw-laptop && (( external_active != 1 ))' "$monitor_watch" >/dev/null
 grep -F 'sync_poll_state' "$monitor_watch" >/dev/null
 grep -F 'done < <(socat' "$monitor_watch" >/dev/null
-pass "clamshell poll only runs on a docked laptop, not desktops or undocked laptops"
+pass "clamshell poll only runs on a laptop that is not answered undocked"
+
+# A probe that could not run is not an answer: the poll is kept, the panel held,
+# and a reload waits out a package transaction the way modeless recovery does.
+grep -F 'answered "$external_active" || exit 0' "$clamshell" >/dev/null
+grep -F 'answered "$clamshell" || exit 0' "$clamshell" >/dev/null
+grep -F 'omarchy-hyprland-reload-guard paused && return 0' "$clamshell" >/dev/null
+pass "clamshell reconciler holds on an unanswered probe and does not reload into a package transaction"
 
 # Recovery costs a reload per attempt, so it must not run on a healthy machine,
 # and only one loop may run across the events that start it.
@@ -59,15 +66,16 @@ grep -F '.disabled != true and (.width == 0 or .height == 0)' "$ROOT/bin/omarchy
 grep -F 'hyprctl monitors all -j' "$ROOT/bin/omarchy-hyprland-monitor-modeless" >/dev/null
 pass "modeless helper sees mirrors and ignores monitors disabled on purpose"
 
-grep -F 'lid_closed && omarchy-hw-external-monitors' "$hw_clamshell" >/dev/null
-grep -F '/proc/acpi/button/lid/*/state' "$hw_laptop_closed" >/dev/null
+grep -F 'omarchy-hw-external-monitors' "$hw_clamshell" >/dev/null
+grep -F 'lid_closed' "$hw_clamshell" >/dev/null
+grep -F '/proc/acpi/button/lid' "$hw_laptop_closed" >/dev/null
 pass "clamshell helper detects closed-lid external monitor state"
 
 # A mirrored external is absent from plain `monitors`, so asking without `all`
 # reads as a disconnect and hands the mirror toggle straight to recovery.
 grep -F 'hyprctl monitors all -j' "$monitor_external_active" >/dev/null
-grep -F 'select(.name | test("^(eDP|LVDS|DSI)-") | not)' "$monitor_external_active" >/dev/null
-grep -F 'select(.disabled == false)' "$monitor_external_active" >/dev/null
+grep -F '(.name | test("^(eDP|LVDS|DSI)-") | not)' "$monitor_external_active" >/dev/null
+grep -F '.disabled == false' "$monitor_external_active" >/dev/null
 pass "active external monitor helper sees mirrors and ignores monitors disabled on purpose"
 
 grep -F 'omarchy-hyprland-monitor-internal recover >/dev/null 2>&1 || true' "$clamshell" >/dev/null
@@ -105,7 +113,7 @@ pass "lid switch bindings cover every SW_LID device and hand the transition to t
 
 # The handlers take the transition the bind hands them over the platform's
 # possibly stale view of the lid.
-grep -F 'acpi_seen' "$ROOT/bin/omarchy-hw-laptop-closed" >/dev/null
+grep -F 'acpi_unanswered' "$ROOT/bin/omarchy-hw-laptop-closed" >/dev/null
 grep -F 'OMARCHY_LID' "$ROOT/bin/omarchy-hw-clamshell" >/dev/null
 grep -F 'OMARCHY_LID' "$ROOT/bin/omarchy-system-lid-close" >/dev/null
 pass "lid handlers trust the switch transition and ACPI before logind"

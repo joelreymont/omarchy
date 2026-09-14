@@ -74,8 +74,27 @@ poll_clamshell_state() {
 # Hyprland "switch:*:Lid Switch" binds; this poll is the recovery backstop for
 # drift those binds can miss (e.g. across suspend/resume).
 poll_pid=""
+poll_unknown=0
+recheck_at=0
 sync_poll_state() {
-  if omarchy-hw-laptop && omarchy-hyprland-monitor-external-active; then
+  local external_active
+  omarchy-hyprland-monitor-external-active
+  external_active=$?
+
+  # Only an answered "no external" (1) says the laptop is undocked. A query the
+  # compositor did not answer says nothing, and the events that ask arrive
+  # mid-package-transaction too: stopping the poll on one, or never starting
+  # it, leaves nothing to reconcile the panel until the lid moves. So the poll
+  # runs then as well, each pass holding until the probes answer, and the main
+  # loop asks again until it has an answer to start or stop the poll on.
+  if (( external_active == 0 || external_active == 1 )); then
+    poll_unknown=0
+  else
+    poll_unknown=1
+    recheck_at=$(( SECONDS + 2 ))
+  fi
+
+  if omarchy-hw-laptop && (( external_active != 1 )); then
     if [[ -z $poll_pid ]] || ! kill -0 "$poll_pid" 2>/dev/null; then
       poll_clamshell_state &
       poll_pid=$!
@@ -92,23 +111,45 @@ recover_modeless
 
 # Process substitution (not a pipe) keeps this loop in the main shell, so
 # sync_poll_state can start and stop the background poll as monitors come and go.
-while read -r event; do
-  case "$event" in
-    monitoradded\>\>*|monitoraddedv2\>\>*)
-      sync_clamshell_after_monitor_change
-      sync_poll_state
-      recover_modeless
-      ;;
-    monitorremoved\>\>*|monitorremovedv2\>\>*)
-      sync_clamshell_after_monitor_change
-      sync_poll_state
-      recover_modeless
-      ;;
-    # A reload while the monitor is unpowered leaves it at 0x0 with no hotplug
-    # to notice, same as at boot. Our own recovery reload lands here too, and is
-    # a no-op while its loop still holds the pid.
-    configreloaded\>\>*)
-      recover_modeless
-      ;;
-  esac
+# The read times out so the main shell comes back here while the compositor's
+# last answer was no answer; a read that fails outright is socat gone with the
+# session. A timed-out read keeps what it got, so a line split across the
+# timeout is handled whole.
+partial=""
+while true; do
+  if IFS= read -r -t 2 event; then
+    event="$partial$event"
+    partial=""
+    case "$event" in
+      monitoradded\>\>*|monitoraddedv2\>\>*)
+        sync_clamshell_after_monitor_change
+        sync_poll_state
+        recover_modeless
+        ;;
+      monitorremoved\>\>*|monitorremovedv2\>\>*)
+        sync_clamshell_after_monitor_change
+        sync_poll_state
+        recover_modeless
+        ;;
+      # A reload while the monitor is unpowered leaves it at 0x0 with no hotplug
+      # to notice, same as at boot. Our own recovery reload lands here too, and is
+      # a no-op while its loop still holds the pid.
+      configreloaded\>\>*)
+        recover_modeless
+        ;;
+    esac
+  else
+    (( $? > 128 )) || break
+    partial+="$event"
+  fi
+
+  # Asked again every two seconds whichever way the read ended, since a stream
+  # of unrelated events could otherwise keep the timeout, and the question,
+  # from ever coming up. The answer that ends the wait is handled like a
+  # monitor change, so the panel is reconciled on answered probes rather than
+  # the poll retired or kept on that answer alone.
+  if (( poll_unknown && SECONDS >= recheck_at )); then
+    sync_poll_state
+    (( poll_unknown )) || sync_clamshell_after_monitor_change
+  fi
 done < <(socat -U - "UNIX-CONNECT:$SOCKET")

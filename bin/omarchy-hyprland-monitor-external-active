@@ -1,6 +1,25 @@
 #!/bin/bash
 
-# omarchy:summary=Returns true when Hyprland has an active external monitor
+# omarchy:summary=Returns 0 when Hyprland has an active external monitor, 1 when not, 2 when it cannot be asked
 # omarchy:hidden=true
 
-hyprctl monitors all -j | jq -e '.[] | select(.name | test("^(eDP|LVDS|DSI)-") | not) | select(.disabled == false)' >/dev/null 2>&1
+# A compositor that does not answer -- hyprctl failing to start while a package
+# transaction replaces its libraries, a socket busy in a reload, a reply that
+# is not one monitor list -- is not "no external monitor". The clamshell poll
+# holds on 2; 1 stays for a list that really has no enabled external.
+monitors=$(hyprctl monitors all -j 2>/dev/null) || exit 2
+
+# jq settles the question itself: true (0) or false (1) for a single
+# well-formed list, an error (5) for anything the decision cannot rest on. The
+# reply is slurped so a stray second document cannot speak for the first.
+jq -s -e '
+  if length != 1 then error("expected one reply") else .[0] end
+  | if type != "array" then error("not a monitor list") else . end
+  | if all(.[]; (.name | type) == "string" and (.disabled | type) == "boolean") then . else error("monitor without name or state") end
+  | any(.[]; (.name | test("^(eDP|LVDS|DSI)-") | not) and .disabled == false)
+' <<<"$monitors" >/dev/null 2>&1
+case $? in
+  0) exit 0 ;;
+  1) exit 1 ;;
+  *) exit 2 ;;
+esac

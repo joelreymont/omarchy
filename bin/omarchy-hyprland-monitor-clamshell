@@ -23,6 +23,34 @@ valid_scale() {
   [[ $1 =~ ^[0-9]+([.][0-9]+)?$ ]]
 }
 
+# A probe answers 0 (yes) or 1 (no). Anything else -- 2 from a probe that could
+# not ask, 127 from a helper that could not start -- is no answer at all.
+answered() {
+  (( $1 == 0 || $1 == 1 ))
+}
+
+reload_hyprland() {
+  # The package hooks pause Hyprland's reload for a transaction and reload on
+  # resume, when the tree is whole again; a flag written meanwhile is applied
+  # then. Reloading now would read a half-replaced tree, which the pause exists
+  # to prevent.
+  omarchy-hyprland-reload-guard paused && return 0
+  hyprctl reload >/dev/null 2>&1 || true
+}
+
+# 0 when Hyprland reports the internal panel enabled, 1 when it is disabled or
+# not in the list, 2 when the compositor cannot be asked.
+internal_enabled() {
+  local monitors
+  monitors=$(hyprctl monitors all -j 2>/dev/null) || return 2
+  jq -s -e --arg internal "$INTERNAL" 'if length != 1 then error("expected one reply") else .[0] end | if type != "array" then error("not a monitor list") else any(.[]; .name == $internal and .disabled == false) end' <<<"$monitors" >/dev/null 2>&1
+  case $? in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 scales_match() {
   local left="$1"
   local right="$2"
@@ -88,10 +116,28 @@ configured_monitor_value() {
   lua_scalar "$value"
 }
 
+# A rule may name the internal panel by its EDID description rather than by
+# connector (omarchy-hyprland-monitor-scaling pins that form when it is
+# unique); resolve that first, as Hyprland does, so this reconciler and the
+# writer derive the same scale from the same rule.
+regex_escape() {
+  printf '%s' "$1" | sed -E 's/[][\\.*^$/|+?(){}]/\\&/g'
+}
+
+internal_monitor_description() {
+  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal) | .description // ""' | head -1
+}
+
 configured_internal_monitor_value() {
   [[ -n $INTERNAL ]] || return 0
 
-  configured_monitor_value "$INTERNAL" "$1"
+  local description value
+  description=$(internal_monitor_description)
+  if [[ -n $description ]]; then
+    value=$(configured_monitor_value "desc:$(regex_escape "$description")" "$1")
+  fi
+  [[ -n $value ]] || value=$(configured_monitor_value "$INTERNAL" "$1")
+  printf '%s\n' "$value"
 }
 
 configured_monitor_scale() {
@@ -215,10 +261,10 @@ enable_internal() {
   fi
 
   if (( changed )); then
-    hyprctl reload >/dev/null 2>&1 || true
+    reload_hyprland
   fi
 
-  [[ -f $MANUAL_DISABLE_FLAG ]] && omarchy-hyprland-monitor-external-active && return 0
+  [[ -f $MANUAL_DISABLE_FLAG ]] && (( external_active == 0 )) && return 0
   sync_internal_scale
 
   if (( changed )); then
@@ -238,14 +284,43 @@ disable_internal() {
 
   if [[ ! -f $CLAMSHELL_FLAG ]] || [[ $(< "$CLAMSHELL_FLAG") != $config ]]; then
     printf '%s\n' "$config" >"$CLAMSHELL_FLAG"
-    hyprctl reload >/dev/null 2>&1 || true
+    reload_hyprland
+    return 0
+  fi
+
+  # The flag is already in place, yet a reload that failed or was paused can
+  # have left Hyprland driving the panel it names. Only a panel reported
+  # enabled (0) warrants another reload; an unanswered query is no panel to
+  # switch off.
+  local enabled
+  internal_enabled
+  enabled=$?
+  if (( enabled == 0 )); then
+    reload_hyprland
   fi
 }
 
+# Recovery hands a manually disabled or mirrored panel back when no external is
+# left. It asks the compositor itself and acts only on an answered "none", and
+# it goes first: whatever it changes, the decision below rests on answers taken
+# after it, never on one taken before. The lid has no say in recovery.
 omarchy-hyprland-monitor-internal recover >/dev/null 2>&1 || true
 omarchy-hyprland-monitor-internal-mirror recover >/dev/null 2>&1 || true
 
-if omarchy-hw-clamshell && omarchy-hyprland-monitor-external-active; then
+# This runs every two seconds while docked, and a package transaction can
+# leave busctl or hyprctl unable to start for a moment. Read as an open lid or
+# a missing monitor, that moment re-enables the panel behind the closed lid and
+# moves every workspace onto it; held, the next answered poll reconciles as
+# usual. Nothing below changes state on a probe that did not answer.
+omarchy-hyprland-monitor-external-active
+external_active=$?
+answered "$external_active" || exit 0
+
+omarchy-hw-clamshell
+clamshell=$?
+answered "$clamshell" || exit 0
+
+if (( clamshell == 0 && external_active == 0 )); then
   disable_internal
 else
   enable_internal

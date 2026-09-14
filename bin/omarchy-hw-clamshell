@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# omarchy:summary=Returns true when clamshell mode is active
+# omarchy:summary=Returns 0 in clamshell mode, 1 when not, 2 when the lid state is unknown
 # omarchy:hidden=true
 
 # Clamshell = lid closed while driving one or more external monitors.
@@ -16,4 +16,14 @@ lid_closed() {
   omarchy-hw-laptop-closed
 }
 
-lid_closed && omarchy-hw-external-monitors
+# No external monitor means no clamshell whatever the lid is doing, and that
+# check reads sysfs, so it always answers once it runs. Only then does the lid
+# decide; a lid that could not be read (2) passes through as-is rather than as
+# open, and so does a helper that could not start.
+omarchy-hw-external-monitors
+case $? in
+  0) ;;
+  1) exit 1 ;;
+  *) exit 2 ;;
+esac
+lid_closed

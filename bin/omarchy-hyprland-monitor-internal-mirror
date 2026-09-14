@@ -56,7 +56,11 @@ toggle() {
 }
 
 recover() {
-  if ! omarchy-hyprland-monitor-external-active && omarchy-hyprland-toggle-enabled $TOGGLE; then
+  # Only a real "no active external" (1) hands the panel back; a compositor
+  # that could not be asked (2) is held like an active external (0).
+  omarchy-hyprland-monitor-external-active
+  local external_active=$?
+  if (( external_active == 1 )) && omarchy-hyprland-toggle-enabled $TOGGLE; then
     omarchy-hyprland-toggle $TOGGLE off
   fi
 }

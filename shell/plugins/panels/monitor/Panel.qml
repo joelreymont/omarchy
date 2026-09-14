@@ -42,12 +42,36 @@ Panel {
   // Mouse hover on a target updates root state via the components' `hovered`
   // signal so keyboard cursor and pointer share one highlight.
   readonly property var scalePresets: ["1", "1.25", "1.6", "2", "3", "4"]
-  readonly property var scaleValues: {
+
+  // The monitor SCALE applies to. Defaults to the screen this bar instance
+  // lives on — clicking a bar does not move Hyprland's monitor focus, so the
+  // focused monitor is the wrong default for a per-screen widget. Hovering
+  // or selecting a row under DISPLAYS retargets it explicitly.
+  property string scaleTarget: ""
+  readonly property string barMonitor: panel && panel.screen ? panel.screen.name : ""
+  readonly property var targetDisplay: {
     for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.availableScales(scalePresets, display.width, display.height)
+      var d = displays[i]
+      if (d && scaleTarget !== "" && d.name === scaleTarget) return d
     }
+    for (var k = 0; k < displays.length; k++) {
+      var b = displays[k]
+      if (b && barMonitor !== "" && b.name === barMonitor) return b
+    }
+    for (var j = 0; j < displays.length; j++) {
+      var f = displays[j]
+      if (f && f.focused) return f
+    }
+    return null
+  }
+  readonly property string targetMonitor: targetDisplay ? targetDisplay.name : focusedMonitor
+  // A disabled display has no scale to change: the CLI only scales active
+  // monitors, so the controls say so instead of failing quietly.
+  readonly property bool scaleAvailable: !targetDisplay || targetDisplay.enabled
+
+  readonly property var scaleValues: {
+    if (targetDisplay)
+      return Model.availableScales(scalePresets, targetDisplay.width, targetDisplay.height)
     return scalePresets
   }
   property string focusSection: "scale"
@@ -266,20 +290,18 @@ Panel {
   }
 
   function activeScaleIndex() {
-    for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.matchingScaleIndex(scaleValues, monitorScale, display.width, display.height)
+    var d = targetDisplay
+    if (d) {
+      var current = d.scale !== undefined ? d.scale : monitorScale
+      return Model.matchingScaleIndex(scaleValues, current, d.width, d.height)
     }
     return -1
   }
 
   function effectiveScale(scale) {
-    for (var i = 0; i < displays.length; i++) {
-      var display = displays[i]
-      if (display && display.focused)
-        return Model.cleanScale(scale, display.width, display.height)
-    }
+    var d = targetDisplay
+    if (d)
+      return Model.cleanScale(scale, d.width, d.height)
     return normalizeScale(scale)
   }
 
@@ -305,7 +327,8 @@ Panel {
   }
 
   function setScale(scale) {
-    actionProc.command = ["bash", "-c", "omarchy-hyprland-monitor-scaling " + scale]
+    if (!scaleAvailable) return
+    actionProc.command = ["omarchy-hyprland-monitor-scaling", "--monitor", root.targetMonitor, String(scale)]
     if (!actionProc.running) actionProc.running = true
   }
 
@@ -357,6 +380,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       refresh()
+      scaleTarget = ""
       if (brightnessAvailable) {
         focusSection = "brightness"
         selectedIndex = -1
@@ -366,6 +390,16 @@ Panel {
       }
       cursorActive = false
     }
+  }
+
+  // Walking onto a display row (keyboard or hover) retargets SCALE.
+  onFocusSectionChanged: syncScaleTarget()
+  onSelectedIndexChanged: syncScaleTarget()
+  function syncScaleTarget() {
+    if (focusSection !== "monitors") return
+    if (selectedIndex < 0 || selectedIndex >= displays.length) return
+    var d = displays[selectedIndex]
+    if (d && d.name) scaleTarget = d.name
   }
 
   onBrightnessAvailableChanged: clampCursor()
@@ -747,14 +781,15 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
               }
 
-              // Name the monitor SCALE targets, since it only applies to the
-              // focused one.
+              // Name the monitor SCALE targets: the focused one by default,
+              // or the display row last hovered/selected below.
               Text {
                 id: scaleMonitor
                 textFormat: Text.PlainText
-                text: root.focusedMonitor
-                // Only worth naming when more than one display is in play.
-                visible: root.focusedMonitor !== "" && root.enabledDisplayCount > 1
+                text: root.scaleAvailable ? root.targetMonitor : root.targetMonitor + " (off)"
+                // Only worth naming when more than one display is in play, or
+                // when the target cannot be scaled at all.
+                visible: root.targetMonitor !== "" && (root.enabledDisplayCount > 1 || !root.scaleAvailable)
                 color: Qt.darker(root.bar.foreground, 1.4)
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.caption
@@ -768,6 +803,7 @@ Panel {
             Grid {
               id: scaleRow
               width: parent.width
+              opacity: root.scaleAvailable ? 1 : 0.4
               columns: root.scaleValues.length
               spacing: Style.spacing.xs
 
@@ -922,6 +958,8 @@ Panel {
         root.cursorActive = true
         root.focusSection = "monitors"
         root.selectedIndex = monitorRow.rowIndex
+        if (monitorRow.display && monitorRow.display.name)
+          root.scaleTarget = monitorRow.display.name
       }
       onClicked: if (monitorRow.canToggle) root.toggleDisplay(monitorRow.display.name, monitorRow.display.enabled)
     }
